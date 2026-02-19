@@ -1,0 +1,13 @@
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+matplotlib>=3.4.0
+seaborn>=0.11.0
+scikit-learn>=1.0.0
+torch>=1.10.0
+hyperopt>=0.2.7        # Essencial para o ML4FF (Cap 5) 
+joblib>=1.1.0          # Para salvar modelos scikit-learn
+tqdm>=4.60.0           # Barras de progresso para os loops de treino
+jupyterlab             # Para rodar os notebooks
+xgboost>=1.5.0         # Usado no Capítulo 6 [cite: 2311]
+lightgbm>=3.3.0        # Usado no Capítulo 6 [cite: 2316]

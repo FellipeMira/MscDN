@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Data (ignoring large raster data)
+data/raster/*.nc
+data/raster/*.tif
+data/raster/cube/
+data/raster/resposta/
+
+# OS files
+.DS_Store
