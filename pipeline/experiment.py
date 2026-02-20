@@ -8,9 +8,9 @@ Strategy to avoid recomputing expensive steps
 ----------------------------------------------
 1. **Raw timeseries extraction** is done once and cached as
    ``base_table_P{max_P}.parquet``.  All (P, Q) combos reuse this table.
-2. **P95 raster** is computed once from the 30-year NetCDF climatological
-   cube and saved as a fixed GeoTIFF artefact.  All experiments load
-   the same raster — no recomputation.
+2. **Percentile rasters** (P90, P95, P100) are computed once from the
+   30-year NetCDF climatological cube and saved as fixed GeoTIFF
+   artefacts.  All experiments load the same rasters — no recomputation.
 3. **Feature columns** for a given P are a subset of columns already
    present in the base table (which contains lags up to ``max(P)``).
 4. **Target columns** for each Q are added once to the base table.
@@ -49,11 +49,15 @@ from .config import PipelineConfig, SampleMode
 from .ingestion import (
     extract_pixel_timeseries,
     list_sorted_tiffs,
-    load_p95_grid,
     validate_alignment,
 )
 from .features import build_features
-from .targets import add_target_columns, compute_p95, ensure_p95_raster
+from .targets import (
+    add_target_columns,
+    align_thresholds,
+    ensure_percentile_rasters,
+    load_percentile_grids,
+)
 from .splitting import (
     check_no_leakage,
     fit_transformers,
@@ -214,34 +218,27 @@ class ExperimentRunner:
             how="left",
         )
 
-        # 5. Load fixed P95 raster (computed once from 30-year cube)
-        #    ensure_p95_raster will skip if file already exists.
-        ensure_p95_raster(
+        # 5. Load fixed percentile rasters (P90/P95/P100, computed once)
+        #    ensure_percentile_rasters will skip if files already exist.
+        thresholds_dir = self.cfg.fuzzy_config.thresholds_dir
+        ensure_percentile_rasters(
             cube_nc=self.cfg.cube_nc,
-            p95_tif=self.cfg.p95_file,
+            out_dir=thresholds_dir,
         )
-        p95_grid = load_p95_grid(self.cfg.p95_file, stride=self.cfg.spatial_stride)
-        print(f"  P95 loaded from raster: {self.cfg.p95_file} "
-              f"({len(p95_grid)} pixels)")
-
-        # Determine p95 method and supply the external grid
-        p95_method = self.cfg.fuzzy_config.p95_source  # 'external' (default)
-        splits = make_splits(base_df, self.cfg.split_config)
-        train_mask = splits["train_mask"]
-
-        p95 = compute_p95(
-            base_df,
-            train_mask,
-            band="tp",
-            method=p95_method,
-            external_p95=p95_grid,
+        pct_grid = load_percentile_grids(
+            thresholds_dir, stride=self.cfg.spatial_stride,
         )
+        print(f"  Thresholds loaded from: {thresholds_dir} "
+              f"({len(pct_grid)} pixels)")
+
+        # Align thresholds with base_df rows
+        thresholds_aligned = align_thresholds(base_df, pct_grid)
 
         # 6. Add target columns for all Q values
         base_df, target_metas = add_target_columns(
             base_df,
             self.cfg.q_values,
-            p95,
+            thresholds_aligned,
             self.cfg.fuzzy_config,
         )
 

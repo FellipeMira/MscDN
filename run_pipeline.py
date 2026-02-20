@@ -82,7 +82,6 @@ def default_config() -> PipelineConfig:
     """Full production configuration."""
     return PipelineConfig(
         cube_dir="data/raster/cube",
-        p95_file="data/raster/p95_precipitacao.tif",
         roi_file="data/vector/ValeDoParaiba.geojson",
         output_dir="experiments",
         p_values=[3, 6, 12, 24],
@@ -98,14 +97,13 @@ def default_config() -> PipelineConfig:
         ),
         fuzzy_config=FuzzyConfig(
             mode=TargetMode.SIGMOID,
-            slope=2.0,
-            offset=0.0,
-            p95_source="external",
+            eps=0.02,
+            thresholds_dir="data/raster",
         ),
         split_config=SplitConfig(
             strategy=SplitStrategy.FIXED,
             train_end="2022-12-31",
-            val_end="2023-02-28",
+            val_end="2023-01-31",
         ),
         spatial_stride=2,
         max_files=None,
@@ -120,9 +118,9 @@ def quick_config() -> PipelineConfig:
     """Fast smoke-test configuration (small data, few models)."""
     cfg = default_config()
     cfg.output_dir = "experiments_quick"
-    cfg.p_values = [12, 24]
-    cfg.q_values = [1, 4]
-    cfg.max_files = 5
+    cfg.p_values = [3, 6]
+    cfg.q_values = [1, 3]
+    cfg.max_files = None          # use all 14 files
     cfg.sample_frac = 0.10
     cfg.spatial_stride = 4
     cfg.feature_config.rolling_windows = [3]
@@ -196,11 +194,12 @@ def main():
         families = ["D", "L", "T", "E"]
 
     print(f"\nPipeline Configuration:")
-    print(f"  Cube dir     : {cfg.cube_dir}")
-    print(f"  Cube NC (P95): {cfg.cube_nc}")
-    print(f"  P95 raster   : {cfg.p95_file}")
-    print(f"  P95 source   : {cfg.fuzzy_config.p95_source}")
-    print(f"  Output dir   : {cfg.output_dir}")
+    print(f"  Cube dir       : {cfg.cube_dir}")
+    print(f"  Cube NC (hist) : {cfg.cube_nc}")
+    print(f"  Thresholds dir : {cfg.fuzzy_config.thresholds_dir}")
+    print(f"  VP mode        : {cfg.fuzzy_config.mode.value}")
+    print(f"  VP eps         : {cfg.fuzzy_config.eps}")
+    print(f"  Output dir     : {cfg.output_dir}")
     print(f"  P values     : {cfg.p_values}")
     print(f"  Q values     : {cfg.q_values}")
     print(f"  Sample mode  : {cfg.sample_mode.value}")

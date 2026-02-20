@@ -36,6 +36,19 @@ class TestConfig:
         assert loaded.p_values == [3, 6]
         assert loaded.q_values == [1]
 
+    def test_fuzzy_config_defaults(self):
+        from pipeline.config import FuzzyConfig, TargetMode
+        cfg = FuzzyConfig()
+        assert cfg.mode == TargetMode.SIGMOID
+        assert cfg.eps == 0.02
+        assert cfg.thresholds_dir == "data/raster"
+
+    def test_target_mode_enum(self):
+        from pipeline.config import TargetMode
+        assert TargetMode.PIECEWISE.value == "piecewise"
+        assert TargetMode.SIGMOID.value == "sigmoid"
+        assert TargetMode.TANH.value == "tanh"
+
     def test_file_hash(self, tmp_path):
         from pipeline.config import file_hash
         f = tmp_path / "dummy.txt"
@@ -126,11 +139,165 @@ class TestFeatures:
 
 
 # ======================================================================== #
-#  Targets tests                                                            #
+#  VP Target function tests                                                 #
 # ======================================================================== #
 
-class TestTargets:
-    def test_sigmoid_range(self):
+class TestVPFunctions:
+    """Test the three VP mapping functions with known anchor points."""
+
+    @pytest.fixture
+    def thresholds(self):
+        """Per-pixel thresholds: P90=10, P95=15, P100=25."""
+        n = 200
+        return {
+            "p90": np.full(n, 10.0),
+            "p95": np.full(n, 15.0),
+            "p100": np.full(n, 25.0),
+        }
+
+    @pytest.fixture
+    def precip_samples(self):
+        """Test precipitation values spanning below-P90 to above-P100."""
+        return np.array([5.0, 10.0, 12.5, 15.0, 20.0, 25.0, 30.0])
+
+    def test_piecewise_anchors(self, thresholds):
+        """Piecewise must hit exact anchors: P90→0, P95→0.5, P100→1."""
+        from pipeline.targets import _vp_piecewise
+
+        n = 3
+        p90 = np.array([10.0, 10.0, 10.0])
+        p95 = np.array([15.0, 15.0, 15.0])
+        p100 = np.array([25.0, 25.0, 25.0])
+        precip = np.array([10.0, 15.0, 25.0])
+
+        vp = _vp_piecewise(precip, p90, p95, p100)
+        np.testing.assert_allclose(vp, [0.0, 0.5, 1.0], atol=1e-10)
+
+    def test_piecewise_saturation(self, thresholds):
+        """Values below P90 → 0, above P100 → 1."""
+        from pipeline.targets import _vp_piecewise
+
+        p90 = np.array([10.0, 10.0])
+        p95 = np.array([15.0, 15.0])
+        p100 = np.array([25.0, 25.0])
+
+        vp = _vp_piecewise(np.array([5.0, 30.0]), p90, p95, p100)
+        assert vp[0] == 0.0
+        assert vp[1] == 1.0
+
+    def test_piecewise_monotonic(self, precip_samples, thresholds):
+        """VP must be monotonically non-decreasing."""
+        from pipeline.targets import _vp_piecewise
+
+        n = len(precip_samples)
+        vp = _vp_piecewise(
+            precip_samples,
+            thresholds["p90"][:n],
+            thresholds["p95"][:n],
+            thresholds["p100"][:n],
+        )
+        assert np.all(np.diff(vp) >= 0)
+
+    def test_sigmoid_range_01(self, precip_samples, thresholds):
+        """Sigmoid must produce values in [0, 1]."""
+        from pipeline.targets import _vp_sigmoid
+
+        n = len(precip_samples)
+        vp = _vp_sigmoid(
+            precip_samples,
+            thresholds["p90"][:n],
+            thresholds["p95"][:n],
+            thresholds["p100"][:n],
+            eps=0.02,
+        )
+        assert vp.min() >= 0.0
+        assert vp.max() <= 1.0
+
+    def test_sigmoid_anchor_p95(self):
+        """At P95, sigmoid should be ≈ 0.5."""
+        from pipeline.targets import _vp_sigmoid
+
+        precip = np.array([15.0])
+        vp = _vp_sigmoid(precip, np.array([10.0]), np.array([15.0]), np.array([25.0]))
+        assert abs(vp[0] - 0.5) < 1e-6
+
+    def test_sigmoid_saturation(self):
+        """Hard saturation: below P90 → 0, above P100 → 1."""
+        from pipeline.targets import _vp_sigmoid
+
+        vp = _vp_sigmoid(
+            np.array([5.0, 30.0]),
+            np.array([10.0, 10.0]),
+            np.array([15.0, 15.0]),
+            np.array([25.0, 25.0]),
+        )
+        assert vp[0] == 0.0
+        assert vp[1] == 1.0
+
+    def test_tanh_range_01(self, precip_samples, thresholds):
+        """Tanh must produce values in [0, 1]."""
+        from pipeline.targets import _vp_tanh
+
+        n = len(precip_samples)
+        vp = _vp_tanh(
+            precip_samples,
+            thresholds["p90"][:n],
+            thresholds["p95"][:n],
+            thresholds["p100"][:n],
+            eps=0.02,
+        )
+        assert vp.min() >= 0.0
+        assert vp.max() <= 1.0
+
+    def test_tanh_anchor_p95(self):
+        """At P95, tanh should be ≈ 0.5."""
+        from pipeline.targets import _vp_tanh
+
+        vp = _vp_tanh(
+            np.array([15.0]),
+            np.array([10.0]), np.array([15.0]), np.array([25.0]),
+        )
+        assert abs(vp[0] - 0.5) < 1e-6
+
+    def test_tanh_saturation(self):
+        """Hard saturation at P90/P100."""
+        from pipeline.targets import _vp_tanh
+
+        vp = _vp_tanh(
+            np.array([5.0, 30.0]),
+            np.array([10.0, 10.0]),
+            np.array([15.0, 15.0]),
+            np.array([25.0, 25.0]),
+        )
+        assert vp[0] == 0.0
+        assert vp[1] == 1.0
+
+    def test_compute_vp_dispatcher(self):
+        """compute_vp dispatches correctly to all methods."""
+        from pipeline.config import TargetMode
+        from pipeline.targets import compute_vp
+
+        precip = np.array([5.0, 10.0, 15.0, 20.0, 25.0, 30.0])
+        p90 = np.full(6, 10.0)
+        p95 = np.full(6, 15.0)
+        p100 = np.full(6, 25.0)
+
+        for mode in [TargetMode.PIECEWISE, TargetMode.SIGMOID, TargetMode.TANH]:
+            vp = compute_vp(precip, p90, p95, p100, method=mode, eps=0.02)
+            assert vp.shape == (6,)
+            assert vp.min() >= 0.0
+            assert vp.max() <= 1.0
+            # At P95 → ~0.5 for all methods
+            assert abs(vp[2] - 0.5) < 0.01
+
+
+# ======================================================================== #
+#  Build target integration test                                            #
+# ======================================================================== #
+
+class TestBuildTarget:
+    def test_build_target_produces_valid_vp(self):
+        """build_target should produce VP in [0, 1] with correct shape."""
         from pipeline.config import FuzzyConfig, TargetMode
         from pipeline.targets import build_target
 
@@ -141,30 +308,23 @@ class TestTargets:
             "tp": np.random.exponential(1.0, n),
         })
         df = df.sort_values(["pixel_id", "time"])
-        p95 = pd.Series(np.full(n, 2.0))
-        cfg = FuzzyConfig(mode=TargetMode.SIGMOID, slope=2.0, offset=0.0)
-        y, meta = build_target(df, Q=1, p95=p95, fuzzy_config=cfg)
-        valid = y.dropna()
-        assert valid.min() >= 0.0
-        assert valid.max() <= 1.0
 
-    def test_fuzzy_range(self):
-        from pipeline.config import FuzzyConfig, TargetMode
-        from pipeline.targets import build_target
-
-        n = 100
-        df = pd.DataFrame({
-            "pixel_id": np.repeat([0, 1], n // 2),
-            "time": list(range(n)),
-            "tp": np.random.exponential(1.0, n),
+        thresholds_aligned = pd.DataFrame({
+            "p90": np.full(n, 0.5),
+            "p95": np.full(n, 1.0),
+            "p100": np.full(n, 3.0),
         })
-        df = df.sort_values(["pixel_id", "time"])
-        p95 = pd.Series(np.full(n, 2.0))
-        cfg = FuzzyConfig(mode=TargetMode.FUZZY, slope=2.0, offset=0.0)
-        y, meta = build_target(df, Q=1, p95=p95, fuzzy_config=cfg)
-        valid = y.dropna()
-        assert valid.min() >= 0.0
-        assert valid.max() <= 1.0
+
+        for mode in [TargetMode.PIECEWISE, TargetMode.SIGMOID, TargetMode.TANH]:
+            cfg = FuzzyConfig(mode=mode, eps=0.02)
+            y, meta = build_target(
+                df, Q=1, thresholds_aligned=thresholds_aligned, target_config=cfg,
+            )
+            valid = y.dropna()
+            assert valid.min() >= 0.0
+            assert valid.max() <= 1.0
+            assert meta["Q"] == 1
+            assert meta["target_mode"] == mode.value
 
 
 # ======================================================================== #
@@ -215,11 +375,8 @@ class TestSplitting:
 
         info = fit_transformers(train, ["a", "b"], "standard")
         test_scaled = transform_split(test, info)
-        # Train: mean=2.0, std=1.0 (ddof=0 in sklearn) → std=0.8165
-        # test[a=4] → (4-2)/0.8165 ≈ 2.449
-        # Key check: scaler was fit on train only (test values > train max → scaled > 1)
-        assert test_scaled["a"].iloc[0] > 1.0  # 4.0 is above train mean
-        assert test_scaled["a"].iloc[1] > test_scaled["a"].iloc[0]  # ordering preserved
+        assert test_scaled["a"].iloc[0] > 1.0
+        assert test_scaled["a"].iloc[1] > test_scaled["a"].iloc[0]
 
 
 # ======================================================================== #
@@ -238,7 +395,6 @@ class TestLeakageChecks:
         tr = df.index < 10
         va = (df.index >= 10) & (df.index < 20)
         te = df.index >= 20
-        # Should not raise
         check_no_leakage(df, tr, va, te, feature_cols=["feat_1"])
 
     def test_check_no_leakage_fails_on_overlap(self):
@@ -250,7 +406,7 @@ class TestLeakageChecks:
             "feat_1": np.random.randn(n),
         })
         tr = df.index < 15
-        va = (df.index >= 10) & (df.index < 20)  # overlaps with train!
+        va = (df.index >= 10) & (df.index < 20)
         te = df.index >= 20
         with pytest.raises(AssertionError, match="LEAKAGE"):
             check_no_leakage(df, tr, va, te)
@@ -264,7 +420,7 @@ class TestModelRegistry:
     def test_get_all_models(self):
         from pipeline.models.registry import get_model_registry
         entries = get_model_registry()
-        assert len(entries) > 10  # should have many models
+        assert len(entries) > 10
 
     def test_instantiate_ridge(self):
         from pipeline.models.registry import get_model, instantiate_model

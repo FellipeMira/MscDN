@@ -1,19 +1,35 @@
 """
 pipeline.evaluation
 ===================
-Metrics computation and reporting for fuzzy / probabilistic targets.
+Metrics computation and reporting for VP (Valor de Probabilidade) targets.
 
 Metrics
 -------
-Since the target is a continuous score in [0, 1]:
+Since the target is a continuous VP score in [0, 1] anchored on P90/P95/P100:
 
 * **Brier score**  — proper scoring rule for probabilistic forecasts.
-* **RMSE**         — root mean squared error on the continuous score.
-* **MAE**          — mean absolute error on the continuous score.
+* **RMSE**         — root mean squared error on the continuous VP score.
+* **MAE**          — mean absolute error on the continuous VP score.
 * **R²**           — coefficient of determination.
-* **Binary accuracy / F1** — after thresholding at 0.5.
-* **AUC-ROC**      — treating (y > 0.5) as the positive class.
+* **Binary accuracy / F1** — after thresholding VP at 0.5 (i.e. P95).
+* **AUC-ROC**      — treating (VP > 0.5) as the positive class.
 * **Log-loss**     — binary cross-entropy (clipped predictions).
+* **Focal loss**   — weighted BCE that down-weights easy examples.
+
+Loss Recommendations for VP Targets
+------------------------------------
+=============  ======  ===========  ======================================
+Loss           Type    Best when    Notes
+=============  ======  ===========  ======================================
+MSE            cont.   balanced     Simple, smooth gradient, good default.
+BCE            prob.   imbalanced   Treats VP as soft probability.
+Focal          prob.   rare events  γ=2 focuses on hard examples.
+Huber          cont.   outliers     L1-like for large errors.
+=============  ======  ===========  ======================================
+
+For VP targets where extreme events (VP > 0.5) are rare, **Focal loss**
+or **BCE** tend to outperform MSE.  Use MSE / Huber if the VP distribution
+is relatively balanced.
 
 Public API
 ----------

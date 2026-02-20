@@ -55,9 +55,10 @@ class SampleMode(str, Enum):
 
 
 class TargetMode(str, Enum):
-    """Which target transformation to use."""
-    FUZZY = "fuzzy"        # Option A — fuzzy membership around p95
-    SIGMOID = "sigmoid"    # Option B — sigmoid mapping above p95
+    """VP mapping function for extreme-event target construction."""
+    PIECEWISE = "piecewise"  # Two-segment linear with saturation at P90/P100
+    SIGMOID = "sigmoid"      # Calibrated logistic centred on P95
+    TANH = "tanh"            # Calibrated hyperbolic tangent centred on P95
 
 
 class SplitStrategy(str, Enum):
@@ -72,18 +73,21 @@ class SplitStrategy(str, Enum):
 # ---------------------------------------------------------------------------
 @dataclass
 class FuzzyConfig:
-    """Parameters for target construction."""
+    """
+    Parameters for VP target construction.
+
+    The target is a continuous value in [0, 1] anchored on three
+    climatological thresholds (P90 → 0, P95 → 0.5, P100 → 1).
+    """
     mode: TargetMode = TargetMode.SIGMOID
-    slope: float = 2.0                # sigmoid steepness
-    offset: float = 0.0              # shift relative to p95
-    p95_source: str = "external"     # 'external' (recommended) | 'train' (legacy)
+    eps: float = 0.02                 # how close VP gets to 0 at P90 (sigmoid/tanh)
+    thresholds_dir: str = "data/raster"   # dir with p90/p95/p100 rasters
 
     def to_dict(self) -> dict:
         return {
             "mode": self.mode.value,
-            "slope": self.slope,
-            "offset": self.offset,
-            "p95_source": self.p95_source,
+            "eps": self.eps,
+            "thresholds_dir": self.thresholds_dir,
         }
 
 
@@ -148,7 +152,7 @@ class PipelineConfig:
     # -- Paths --
     cube_dir: str = "data/raster/cube"
     cube_nc: str = "data/raster/cubo_precipitacao.nc"   # 30-year climatological cube
-    p95_file: str = "data/raster/p95_precipitacao.tif"   # fixed P95 raster artifact
+    thresholds_dir: str = "data/raster"                  # P90/P95/P100 GeoTIFF dir
     roi_file: Optional[str] = "data/vector/ValeDoParaiba.geojson"
     output_dir: str = "experiments"
 
@@ -178,7 +182,7 @@ class PipelineConfig:
         d = {
             "cube_dir": self.cube_dir,
             "cube_nc": self.cube_nc,
-            "p95_file": self.p95_file,
+            "thresholds_dir": self.thresholds_dir,
             "roi_file": self.roi_file,
             "output_dir": self.output_dir,
             "p_values": self.p_values,
@@ -209,7 +213,13 @@ class PipelineConfig:
         raw["feature_config"] = FeatureConfig(**raw["feature_config"])
         fc = raw["fuzzy_config"]
         fc["mode"] = TargetMode(fc["mode"])
+        # Backward compat: old configs may have slope/offset/p95_source
+        for old_key in ("slope", "offset", "p95_source"):
+            fc.pop(old_key, None)
         raw["fuzzy_config"] = FuzzyConfig(**fc)
+        # Backward compat: old configs may have p95_file instead of thresholds_dir
+        if "p95_file" in raw:
+            raw.setdefault("thresholds_dir", str(Path(raw.pop("p95_file")).parent))
         sc = raw["split_config"]
         sc["strategy"] = SplitStrategy(sc["strategy"])
         raw["split_config"] = SplitConfig(**sc)

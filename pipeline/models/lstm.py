@@ -1,15 +1,25 @@
 """
 pipeline.models.lstm
 ====================
-PyTorch LSTM architectures for sequence-based forecasting.
+PyTorch LSTM architectures for probabilistic extreme-event forecasting.
+
+The models predict a continuous VP ∈ [0, 1] (Valor de Probabilidade) via a
+final **sigmoid** activation.  Three loss functions are available:
+
+* **MSE** (default) — mean squared error, simple and effective for
+  continuous targets.
+* **BCE** — binary cross-entropy, treats VP as a soft probability.
+* **Focal** — down-weights easy examples to focus on rare extremes
+  (γ = 2.0 by default).
+* **Huber** — robust to outliers, smooth L1 around zero.
 
 Two variants
 ------------
-**LSTMModel**  — Plain LSTM → dense head.
+**LSTMModel**  — Plain LSTM → dense head → sigmoid.
   Input: ``(batch, seq_len=P, n_features)``
-  Output: ``(batch, 1)``
+  Output: ``(batch, 1)`` ∈ [0, 1]
 
-**LSTMPreModel** — Dense layers per time-step → LSTM → dense head.
+**LSTMPreModel** — Dense layers per time-step → LSTM → dense head → sigmoid.
   Input:  same as above
   The dense "pre-processor" learns a richer per-step representation
   before the recurrent block.
@@ -27,11 +37,60 @@ import numpy as np
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
     from torch.utils.data import DataLoader, TensorDataset
 
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+
+
+# ======================================================================== #
+#  Loss functions                                                           #
+# ======================================================================== #
+
+if TORCH_AVAILABLE:
+
+    class FocalLoss(nn.Module):
+        """
+        Focal loss for continuous VP targets in [0, 1].
+
+        FL(p_t) = -α_t · (1 − p_t)^γ · log(p_t)
+
+        Treats target as soft label for binary cross-entropy, then applies
+        the focal weighting to down-weight easy examples.
+        """
+
+        def __init__(self, gamma: float = 2.0, alpha: float = 0.25):
+            super().__init__()
+            self.gamma = gamma
+            self.alpha = alpha
+
+        def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+            pred = pred.clamp(1e-7, 1.0 - 1e-7)
+            bce = -(target * torch.log(pred) + (1 - target) * torch.log(1 - pred))
+            p_t = target * pred + (1 - target) * (1 - pred)
+            focal_weight = (1 - p_t) ** self.gamma
+            alpha_t = target * self.alpha + (1 - target) * (1 - self.alpha)
+            return (alpha_t * focal_weight * bce).mean()
+
+
+    def _get_loss_fn(loss_name: str) -> nn.Module:
+        """Instantiate a loss function by name."""
+        loss_name = loss_name.lower()
+        if loss_name == "mse":
+            return nn.MSELoss()
+        elif loss_name == "bce":
+            return nn.BCELoss()
+        elif loss_name == "focal":
+            return FocalLoss(gamma=2.0, alpha=0.25)
+        elif loss_name == "huber":
+            return nn.HuberLoss(delta=0.1)
+        else:
+            raise ValueError(
+                f"Unknown loss '{loss_name}'. "
+                f"Choose from: mse, bce, focal, huber."
+            )
 
 
 # ======================================================================== #
@@ -41,9 +100,15 @@ except ImportError:
 if TORCH_AVAILABLE:
 
     class _LSTMNet(nn.Module):
-        """Plain LSTM → linear head."""
+        """Plain LSTM → linear head → sigmoid."""
 
-        def __init__(self, input_size: int, hidden_size: int, num_layers: int, dropout: float):
+        def __init__(
+            self,
+            input_size: int,
+            hidden_size: int,
+            num_layers: int,
+            dropout: float,
+        ):
             super().__init__()
             self.lstm = nn.LSTM(
                 input_size=input_size,
@@ -52,7 +117,10 @@ if TORCH_AVAILABLE:
                 batch_first=True,
                 dropout=dropout if num_layers > 1 else 0.0,
             )
-            self.head = nn.Linear(hidden_size, 1)
+            self.head = nn.Sequential(
+                nn.Linear(hidden_size, 1),
+                nn.Sigmoid(),
+            )
 
         def forward(self, x):
             # x: (B, T, F)
@@ -61,7 +129,7 @@ if TORCH_AVAILABLE:
             return self.head(last).squeeze(-1)
 
     class _LSTMPreNet(nn.Module):
-        """Dense pre-processor per time-step → LSTM → linear head."""
+        """Dense pre-processor per time-step → LSTM → linear head → sigmoid."""
 
         def __init__(
             self,
@@ -72,7 +140,7 @@ if TORCH_AVAILABLE:
             pre_dense_sizes: List[int],
         ):
             super().__init__()
-            layers = []
+            layers: list = []
             in_dim = input_size
             for out_dim in pre_dense_sizes:
                 layers.append(nn.Linear(in_dim, out_dim))
@@ -88,7 +156,10 @@ if TORCH_AVAILABLE:
                 batch_first=True,
                 dropout=dropout if num_layers > 1 else 0.0,
             )
-            self.head = nn.Linear(hidden_size, 1)
+            self.head = nn.Sequential(
+                nn.Linear(hidden_size, 1),
+                nn.Sigmoid(),
+            )
 
         def forward(self, x):
             # x: (B, T, F)
@@ -109,6 +180,8 @@ class _BaseLSTMWrapper:
     Base class with sklearn-style fit / predict that accepts:
       - 2-D tabular input  ``(N, P * n_features)`` — auto-reshaped to 3-D
       - 3-D sequence input ``(N, P, n_features)``
+
+    Output is always in [0, 1] thanks to the sigmoid head.
     """
 
     def __init__(
@@ -120,6 +193,7 @@ class _BaseLSTMWrapper:
         epochs: int = 50,
         batch_size: int = 256,
         patience: int = 10,
+        loss: str = "mse",
         device: Optional[str] = None,
         P: Optional[int] = None,
         n_features: Optional[int] = None,
@@ -134,6 +208,7 @@ class _BaseLSTMWrapper:
         self.epochs = epochs
         self.batch_size = batch_size
         self.patience = patience
+        self.loss = loss
         self.P = P
         self.n_features = n_features
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -163,7 +238,7 @@ class _BaseLSTMWrapper:
         input_size = X_t.shape[-1]
         self.model_ = self._build_net(input_size).to(self.device)
         opt = torch.optim.Adam(self.model_.parameters(), lr=self.lr)
-        criterion = nn.MSELoss()
+        criterion = _get_loss_fn(self.loss)
 
         best_loss = float("inf")
         patience_ctr = 0
@@ -175,7 +250,9 @@ class _BaseLSTMWrapper:
         has_val = X_val is not None and y_val is not None
         if has_val:
             X_v = self._to_tensor(X_val).to(self.device)
-            y_v = torch.tensor(np.asarray(y_val, dtype=np.float32)).to(self.device)
+            y_v = torch.tensor(
+                np.asarray(y_val, dtype=np.float32)
+            ).to(self.device)
 
         for epoch in range(self.epochs):
             self.model_.train()
@@ -201,7 +278,10 @@ class _BaseLSTMWrapper:
             if val_loss < best_loss:
                 best_loss = val_loss
                 patience_ctr = 0
-                self._best_state = {k: v.cpu().clone() for k, v in self.model_.state_dict().items()}
+                self._best_state = {
+                    k: v.cpu().clone()
+                    for k, v in self.model_.state_dict().items()
+                }
             else:
                 patience_ctr += 1
                 if patience_ctr >= self.patience:
@@ -222,14 +302,16 @@ class _BaseLSTMWrapper:
 
 
 class LSTMModel(_BaseLSTMWrapper):
-    """Plain LSTM wrapper (sklearn-compatible)."""
+    """Plain LSTM wrapper with sigmoid output (sklearn-compatible)."""
 
     def _build_net(self, input_size):
-        return _LSTMNet(input_size, self.hidden_size, self.num_layers, self.dropout)
+        return _LSTMNet(
+            input_size, self.hidden_size, self.num_layers, self.dropout,
+        )
 
 
 class LSTMPreModel(_BaseLSTMWrapper):
-    """Dense-pre → LSTM wrapper (sklearn-compatible)."""
+    """Dense-pre → LSTM wrapper with sigmoid output (sklearn-compatible)."""
 
     def __init__(self, pre_dense_sizes: Optional[List[int]] = None, **kwargs):
         super().__init__(**kwargs)
