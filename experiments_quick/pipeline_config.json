@@ -1,0 +1,60 @@
+{
+  "cube_dir": "data/raster/cube",
+  "cube_nc": "data/raster/cubo_precipitacao.nc",
+  "p95_file": "data/raster/p95_precipitacao.tif",
+  "roi_file": "data/vector/ValeDoParaiba.geojson",
+  "output_dir": "experiments_quick",
+  "p_values": [
+    12,
+    24
+  ],
+  "q_values": [
+    1,
+    4
+  ],
+  "sample_mode": "pixel",
+  "feature_config": {
+    "bands": [
+      "tp"
+    ],
+    "rolling_windows": [
+      3
+    ],
+    "rolling_stats": [
+      "mean"
+    ],
+    "include_lags": true,
+    "include_rolling": true,
+    "include_spatial_coords": true,
+    "patch_size": 5,
+    "region_stats": [
+      "mean",
+      "std",
+      "min",
+      "max",
+      "median"
+    ]
+  },
+  "fuzzy_config": {
+    "mode": "sigmoid",
+    "slope": 2.0,
+    "offset": 0.0,
+    "p95_source": "external"
+  },
+  "split_config": {
+    "strategy": "fixed",
+    "train_end": "2022-12-31",
+    "val_end": "2023-02-28",
+    "window_train_size": null,
+    "window_val_size": null,
+    "step_size": null,
+    "spatial_block_col": null
+  },
+  "spatial_stride": 4,
+  "max_files": 5,
+  "sample_frac": 0.1,
+  "chunk_xy": 128,
+  "random_seed": 42,
+  "n_jobs": -1,
+  "created_at": "2026-02-20T10:47:42.342258"
+}

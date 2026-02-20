@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 # --- Configurações ---
 ROI_FILE = r'data/vector/ValeDoParaiba.geojson'
-START_DATE = '2022-12-01'
+START_DATE = '2022-01-01'
 END_DATE = '2023-03-01'
 COLLECTION_ID = 'ECMWF/ERA5_LAND/HOURLY'
 

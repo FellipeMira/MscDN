@@ -9,7 +9,7 @@ ENV/
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# Data (ignoring large raster data)
+# Data
 data/raster/*.nc
 data/raster/*.tif
 data/raster/cube/
@@ -17,3 +17,14 @@ data/raster/resposta/
 
 # OS files
 .DS_Store
+
+# Experiments and Cache
+experiments_quick/cache/
+experiments_fast/
+outputs/
+logs/
+*.parquet
+*.pt
+*.pkl
+*.model
+*.json.gz
