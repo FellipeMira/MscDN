@@ -4,33 +4,34 @@ pipeline.models.lstm
 PyTorch LSTM architectures for probabilistic extreme-event forecasting.
 
 The models predict a continuous VP ∈ [0, 1] (Valor de Probabilidade) via a
-final **sigmoid** activation.  Three loss functions are available:
+final **sigmoid** activation.  Four loss functions are available:
 
-* **MSE** (default) — mean squared error, simple and effective for
-  continuous targets.
+* **MSE** (default) — mean squared error, simple and effective.
 * **BCE** — binary cross-entropy, treats VP as a soft probability.
 * **Focal** — down-weights easy examples to focus on rare extremes
   (γ = 2.0 by default).
 * **Huber** — robust to outliers, smooth L1 around zero.
 
+Training improvements
+---------------------
+* **LR scheduler** — ``ReduceLROnPlateau`` on validation loss.
+* **Gradient clipping** — ``clip_grad_norm_`` with ``max_norm=1.0``.
+* **Mixed precision** — ``torch.amp`` autocast when using CUDA.
+* **Reproducibility** — deterministic seeds for torch, numpy, CUDA.
+* **Per-epoch logging** — ``epoch_history_`` list on the wrapper.
+
 Two variants
 ------------
 **LSTMModel**  — Plain LSTM → dense head → sigmoid.
   Input: ``(batch, seq_len=P, n_features)``
-  Output: ``(batch, 1)`` ∈ [0, 1]
 
 **LSTMPreModel** — Dense layers per time-step → LSTM → dense head → sigmoid.
-  Input:  same as above
-  The dense "pre-processor" learns a richer per-step representation
-  before the recurrent block.
-
-Both expose a sklearn-compatible ``.fit(X, y)`` / ``.predict(X)`` API so
-they integrate seamlessly with the experiment runner.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+import logging
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -43,6 +44,8 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
 
 
 # ======================================================================== #
@@ -182,6 +185,13 @@ class _BaseLSTMWrapper:
       - 3-D sequence input ``(N, P, n_features)``
 
     Output is always in [0, 1] thanks to the sigmoid head.
+
+    Improvements over naive training loop:
+      • ReduceLROnPlateau scheduler
+      • Gradient clipping (max_norm=1.0)
+      • Mixed precision (torch.amp) on CUDA
+      • Deterministic seeding
+      • Per-epoch history logging
     """
 
     def __init__(
@@ -194,9 +204,12 @@ class _BaseLSTMWrapper:
         batch_size: int = 256,
         patience: int = 10,
         loss: str = "mse",
+        max_grad_norm: float = 1.0,
+        use_amp: bool = True,
         device: Optional[str] = None,
         P: Optional[int] = None,
         n_features: Optional[int] = None,
+        random_seed: int = 42,
         **kwargs,
     ):
         if not TORCH_AVAILABLE:
@@ -209,19 +222,31 @@ class _BaseLSTMWrapper:
         self.batch_size = batch_size
         self.patience = patience
         self.loss = loss
+        self.max_grad_norm = max_grad_norm
+        self.use_amp = use_amp
         self.P = P
         self.n_features = n_features
+        self.random_seed = random_seed
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model_ = None
+        self.epoch_history_: List[Dict[str, float]] = []
         self.extra_kwargs = kwargs
 
     def _build_net(self, input_size: int) -> nn.Module:
         raise NotImplementedError
 
+    def _set_seed(self):
+        """Set seeds for reproducibility."""
+        torch.manual_seed(self.random_seed)
+        np.random.seed(self.random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.random_seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
     def _to_tensor(self, X):
         if isinstance(X, np.ndarray):
             if X.ndim == 2:
-                # Reshape flat tabular → (N, P, F)
                 if self.P is None or self.n_features is None:
                     raise ValueError(
                         "For 2-D input, set P and n_features on the model "
@@ -232,6 +257,8 @@ class _BaseLSTMWrapper:
         return X
 
     def fit(self, X, y, X_val=None, y_val=None):
+        self._set_seed()
+
         X_t = self._to_tensor(X).to(self.device)
         y_t = torch.tensor(np.asarray(y, dtype=np.float32)).to(self.device)
 
@@ -240,13 +267,22 @@ class _BaseLSTMWrapper:
         opt = torch.optim.Adam(self.model_.parameters(), lr=self.lr)
         criterion = _get_loss_fn(self.loss)
 
+        # LR scheduler — reduce on plateau
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, mode="min", factor=0.5, patience=max(3, self.patience // 3),
+        )
+
+        # Mixed precision scaler (CUDA only)
+        amp_enabled = self.use_amp and self.device == "cuda"
+        scaler = torch.amp.GradScaler("cuda") if amp_enabled else None
+
         best_loss = float("inf")
         patience_ctr = 0
+        self.epoch_history_ = []
 
         ds = TensorDataset(X_t, y_t)
         loader = DataLoader(ds, batch_size=self.batch_size, shuffle=True)
 
-        # Validation
         has_val = X_val is not None and y_val is not None
         if has_val:
             X_v = self._to_tensor(X_val).to(self.device)
@@ -257,24 +293,60 @@ class _BaseLSTMWrapper:
         for epoch in range(self.epochs):
             self.model_.train()
             epoch_loss = 0.0
+
             for xb, yb in loader:
                 opt.zero_grad()
-                pred = self.model_(xb)
-                loss = criterion(pred, yb)
-                loss.backward()
-                opt.step()
+
+                if amp_enabled:
+                    with torch.amp.autocast("cuda"):
+                        pred = self.model_(xb)
+                        loss = criterion(pred, yb)
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model_.parameters(), self.max_grad_norm,
+                    )
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    pred = self.model_(xb)
+                    loss = criterion(pred, yb)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model_.parameters(), self.max_grad_norm,
+                    )
+                    opt.step()
+
                 epoch_loss += loss.item() * xb.size(0)
+
             epoch_loss /= len(ds)
 
-            # Early stopping on validation
+            # Validation loss
             if has_val:
                 self.model_.eval()
                 with torch.no_grad():
-                    val_pred = self.model_(X_v)
-                    val_loss = criterion(val_pred, y_v).item()
+                    if amp_enabled:
+                        with torch.amp.autocast("cuda"):
+                            val_pred = self.model_(X_v)
+                            val_loss = criterion(val_pred, y_v).item()
+                    else:
+                        val_pred = self.model_(X_v)
+                        val_loss = criterion(val_pred, y_v).item()
             else:
                 val_loss = epoch_loss
 
+            # Log epoch
+            self.epoch_history_.append({
+                "epoch": epoch,
+                "train_loss": epoch_loss,
+                "val_loss": val_loss,
+                "lr": opt.param_groups[0]["lr"],
+            })
+
+            # LR scheduler step
+            scheduler.step(val_loss)
+
+            # Early stopping
             if val_loss < best_loss:
                 best_loss = val_loss
                 patience_ctr = 0
@@ -285,6 +357,10 @@ class _BaseLSTMWrapper:
             else:
                 patience_ctr += 1
                 if patience_ctr >= self.patience:
+                    logger.info(
+                        "Early stopping at epoch %d (best val_loss=%.5f)",
+                        epoch, best_loss,
+                    )
                     break
 
         # Restore best
@@ -297,7 +373,12 @@ class _BaseLSTMWrapper:
         X_t = self._to_tensor(X).to(self.device)
         self.model_.eval()
         with torch.no_grad():
-            preds = self.model_(X_t).cpu().numpy()
+            if self.use_amp and self.device == "cuda":
+                with torch.amp.autocast("cuda"):
+                    preds = self.model_(X_t).cpu().numpy()
+            else:
+                preds = self.model_(X_t).cpu().numpy()
+        return np.clip(preds, 0.0, 1.0)
         return np.clip(preds, 0.0, 1.0)
 
 

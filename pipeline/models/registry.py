@@ -49,6 +49,7 @@ def _entry(
     input_type: str = "tabular",
     default_params: Optional[Dict] = None,
     preprocessing: str = "standard",
+    needs_scaling: bool = True,
     notes: str = "",
 ) -> Dict[str, Any]:
     return {
@@ -58,6 +59,7 @@ def _entry(
         "input_type": input_type,  # "tabular" | "sequence"
         "default_params": default_params or {},
         "preprocessing": preprocessing,
+        "needs_scaling": needs_scaling,
         "notes": notes,
     }
 
@@ -115,12 +117,14 @@ MODEL_FAMILIES: Dict[str, List[Dict[str, Any]]] = {
             "sklearn.tree.DecisionTreeRegressor", "T", "DecisionTree",
             default_params={"max_depth": 12, "random_state": 42},
             preprocessing="none",
+            needs_scaling=False,
             notes="No scaling needed.  Overfits easily — use as sanity check.",
         ),
         _entry(
             "sklearn.tree.ExtraTreeRegressor", "T", "ExtraTree",
             default_params={"max_depth": 12, "random_state": 42},
             preprocessing="none",
+            needs_scaling=False,
         ),
     ],
 
@@ -136,6 +140,7 @@ MODEL_FAMILIES: Dict[str, List[Dict[str, Any]]] = {
                 "random_state": 42,
             },
             preprocessing="none",
+            needs_scaling=False,
         ),
         _entry(
             "sklearn.ensemble.GradientBoostingRegressor", "E", "GradientBoosting",
@@ -147,6 +152,7 @@ MODEL_FAMILIES: Dict[str, List[Dict[str, Any]]] = {
                 "random_state": 42,
             },
             preprocessing="none",
+            needs_scaling=False,
         ),
         _entry(
             "xgboost.XGBRegressor", "E", "XGBoost",
@@ -161,6 +167,7 @@ MODEL_FAMILIES: Dict[str, List[Dict[str, Any]]] = {
                 "verbosity": 0,
             },
             preprocessing="none",
+            needs_scaling=False,
             notes="Requires xgboost package.",
         ),
         _entry(
@@ -176,7 +183,23 @@ MODEL_FAMILIES: Dict[str, List[Dict[str, Any]]] = {
                 "verbosity": -1,
             },
             preprocessing="none",
+            needs_scaling=False,
             notes="Requires lightgbm package.",
+        ),
+        _entry(
+            "catboost.CatBoostRegressor", "E", "CatBoost",
+            default_params={
+                "iterations": 300,
+                "learning_rate": 0.05,
+                "depth": 6,
+                "l2_leaf_reg": 3.0,
+                "random_seed": 42,
+                "verbose": 0,
+                "allow_writing_files": False,
+            },
+            preprocessing="none",
+            needs_scaling=False,
+            notes="Requires catboost package.  Handles cats natively.",
         ),
     ],
 

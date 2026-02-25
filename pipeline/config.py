@@ -100,6 +100,7 @@ class FeatureConfig:
     include_lags: bool = True
     include_rolling: bool = True
     include_spatial_coords: bool = True
+    include_temporal: bool = True      # cyclical time features (hour, month)
     # Patch mode settings
     patch_size: int = 5        # spatial window half-size for PATCH mode
     # Region mode settings
@@ -115,6 +116,7 @@ class FeatureConfig:
             "include_lags": self.include_lags,
             "include_rolling": self.include_rolling,
             "include_spatial_coords": self.include_spatial_coords,
+            "include_temporal": self.include_temporal,
             "patch_size": self.patch_size,
             "region_stats": self.region_stats,
         }
@@ -125,7 +127,7 @@ class SplitConfig:
     """Temporal splitting parameters."""
     strategy: SplitStrategy = SplitStrategy.FIXED
     train_end: str = "2022-12-31"       # inclusive
-    val_end: str = "2023-02-28"         # inclusive; test = everything after
+    val_end: str = "2023-01-31"         # inclusive; test = everything after
     # Rolling / Expanding window parameters
     window_train_size: Optional[int] = None   # number of time steps
     window_val_size: Optional[int] = None
@@ -146,6 +148,31 @@ class SplitConfig:
 
 
 @dataclass
+class TuningConfig:
+    """Optuna hyperparameter tuning configuration."""
+    enabled: bool = False
+    n_trials: int = 30               # trials per model
+    timeout_per_model: Optional[int] = 300   # seconds; None = no limit
+    n_cv_folds: int = 3              # temporal CV folds
+    cv_gap: int = 0                  # gap (unique timesteps) between train/val in CV
+    metric: str = "brier"            # metric to optimise
+    direction: str = "minimize"      # "minimize" or "maximize"
+    calibration_method: str = "f1"   # threshold calibration: "f1", "youden", "pr_auc"
+
+    def to_dict(self) -> dict:
+        return {
+            "enabled": self.enabled,
+            "n_trials": self.n_trials,
+            "timeout_per_model": self.timeout_per_model,
+            "n_cv_folds": self.n_cv_folds,
+            "cv_gap": self.cv_gap,
+            "metric": self.metric,
+            "direction": self.direction,
+            "calibration_method": self.calibration_method,
+        }
+
+
+@dataclass
 class PipelineConfig:
     """Master configuration for one experiment or a full grid search."""
 
@@ -157,6 +184,10 @@ class PipelineConfig:
     output_dir: str = "experiments"
 
     # -- Forecasting grid --
+    # lookback_steps (alias: p_values) — number of past timesteps used as features.
+    #     NOT to be confused with statistical p-values.
+    # forecast_horizons (alias: q_values) — prediction horizons (timesteps ahead).
+    #     NOT to be confused with ARIMA MA order q.
     p_values: List[int] = field(default_factory=lambda: [3, 6, 12, 24])
     q_values: List[int] = field(default_factory=lambda: [1, 3, 6])
 
@@ -165,6 +196,7 @@ class PipelineConfig:
     feature_config: FeatureConfig = field(default_factory=FeatureConfig)
     fuzzy_config: FuzzyConfig = field(default_factory=FuzzyConfig)
     split_config: SplitConfig = field(default_factory=SplitConfig)
+    tuning_config: TuningConfig = field(default_factory=TuningConfig)
 
     # -- Performance --
     spatial_stride: int = 2
@@ -191,6 +223,7 @@ class PipelineConfig:
             "feature_config": self.feature_config.to_dict(),
             "fuzzy_config": self.fuzzy_config.to_dict(),
             "split_config": self.split_config.to_dict(),
+            "tuning_config": self.tuning_config.to_dict(),
             "spatial_stride": self.spatial_stride,
             "max_files": self.max_files,
             "sample_frac": self.sample_frac,
@@ -223,6 +256,11 @@ class PipelineConfig:
         sc = raw["split_config"]
         sc["strategy"] = SplitStrategy(sc["strategy"])
         raw["split_config"] = SplitConfig(**sc)
+        # Tuning config (may be absent in old configs)
+        if "tuning_config" in raw:
+            raw["tuning_config"] = TuningConfig(**raw["tuning_config"])
+        else:
+            raw["tuning_config"] = TuningConfig()
         return cls(**raw)
 
 

@@ -67,6 +67,7 @@ from pipeline.config import (
     FeatureConfig,
     FuzzyConfig,
     SplitConfig,
+    TuningConfig,
     SampleMode,
     SplitStrategy,
     TargetMode,
@@ -94,6 +95,7 @@ def default_config() -> PipelineConfig:
             include_lags=True,
             include_rolling=True,
             include_spatial_coords=True,
+            include_temporal=True,
         ),
         fuzzy_config=FuzzyConfig(
             mode=TargetMode.SIGMOID,
@@ -104,6 +106,15 @@ def default_config() -> PipelineConfig:
             strategy=SplitStrategy.FIXED,
             train_end="2022-12-31",
             val_end="2023-01-31",
+        ),
+        tuning_config=TuningConfig(
+            enabled=False,
+            n_trials=30,
+            timeout_per_model=300,
+            n_cv_folds=3,
+            cv_gap=1,
+            metric="brier",
+            calibration_method="f1",
         ),
         spatial_stride=2,
         max_files=None,
@@ -120,7 +131,7 @@ def quick_config() -> PipelineConfig:
     cfg.output_dir = "experiments_quick"
     cfg.p_values = [3, 6]
     cfg.q_values = [1, 3]
-    cfg.max_files = None          # use all 14 files
+    cfg.max_files = None
     cfg.sample_frac = 0.10
     cfg.spatial_stride = 4
     cfg.feature_config.rolling_windows = [3]
@@ -169,6 +180,17 @@ def parse_args():
         action="store_true",
         help="Skip leakage/quality checks for faster iteration.",
     )
+    parser.add_argument(
+        "--tune",
+        action="store_true",
+        help="Enable Optuna HP tuning (requires optuna package).",
+    )
+    parser.add_argument(
+        "--n-trials",
+        type=int,
+        default=30,
+        help="Number of Optuna trials per model (default: 30).",
+    )
     return parser.parse_args()
 
 
@@ -193,6 +215,11 @@ def main():
     if args.quick and families is None:
         families = ["D", "L", "T", "E"]
 
+    # Enable tuning if --tune flag
+    if args.tune:
+        cfg.tuning_config.enabled = True
+        cfg.tuning_config.n_trials = args.n_trials
+
     print(f"\nPipeline Configuration:")
     print(f"  Cube dir       : {cfg.cube_dir}")
     print(f"  Cube NC (hist) : {cfg.cube_nc}")
@@ -200,16 +227,18 @@ def main():
     print(f"  VP mode        : {cfg.fuzzy_config.mode.value}")
     print(f"  VP eps         : {cfg.fuzzy_config.eps}")
     print(f"  Output dir     : {cfg.output_dir}")
-    print(f"  P values     : {cfg.p_values}")
-    print(f"  Q values     : {cfg.q_values}")
-    print(f"  Sample mode  : {cfg.sample_mode.value}")
-    print(f"  Target mode  : {cfg.fuzzy_config.mode.value}")
-    print(f"  Split        : {cfg.split_config.strategy.value} "
-          f"(train≤{cfg.split_config.train_end}, val≤{cfg.split_config.val_end})")
-    print(f"  Stride       : {cfg.spatial_stride}")
-    print(f"  Sample frac  : {cfg.sample_frac}")
-    print(f"  Max files    : {cfg.max_files or 'all'}")
-    print(f"  Model families: {families or 'all'}")
+    print(f"  P values (lookback)   : {cfg.p_values}")
+    print(f"  Q values (horizon)    : {cfg.q_values}")
+    print(f"  Sample mode    : {cfg.sample_mode.value}")
+    print(f"  Split          : {cfg.split_config.strategy.value} "
+          f"(train≤{cfg.split_config.train_end}, "
+          f"val≤{cfg.split_config.val_end})")
+    print(f"  Stride         : {cfg.spatial_stride}")
+    print(f"  Sample frac    : {cfg.sample_frac}")
+    print(f"  Max files      : {cfg.max_files or 'all'}")
+    print(f"  Model families : {families or 'all'}")
+    print(f"  HP Tuning      : {'ON (' + str(cfg.tuning_config.n_trials) + ' trials)' if cfg.tuning_config.enabled else 'OFF'}")
+    print(f"  Temporal feats : {cfg.feature_config.include_temporal}")
     print()
 
     runner = ExperimentRunner(
@@ -226,7 +255,9 @@ def main():
         print(f"{'='*60}")
         display_cols = [c for c in summary.columns
                         if c in ("experiment", "model", "test_brier", "test_rmse",
-                                 "test_r2", "test_auc_roc", "elapsed_s")]
+                                 "test_r2", "test_auc_roc", "test_pr_auc",
+                                 "anomaly_f1", "anomaly_pr_auc", "anomaly_fpr",
+                                 "threshold", "tuned", "elapsed_s")]
         if display_cols:
             print(summary[display_cols].to_string(index=False))
         else:

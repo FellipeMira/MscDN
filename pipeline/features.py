@@ -154,6 +154,25 @@ def _build_features_pixel(
             if c in df.columns:
                 feature_cols.append(c)
 
+    # --- Cyclical temporal features ---
+    if cfg.include_temporal and "time" in df.columns:
+        times = pd.to_datetime(df["time"])
+        # Hour of day (sin/cos)
+        hour = times.dt.hour
+        df["hour_sin"] = np.sin(2 * np.pi * hour / 24)
+        df["hour_cos"] = np.cos(2 * np.pi * hour / 24)
+        feature_cols.extend(["hour_sin", "hour_cos"])
+        # Month of year (sin/cos)
+        month = times.dt.month
+        df["month_sin"] = np.sin(2 * np.pi * (month - 1) / 12)
+        df["month_cos"] = np.cos(2 * np.pi * (month - 1) / 12)
+        feature_cols.extend(["month_sin", "month_cos"])
+        # Day of year (sin/cos)
+        doy = times.dt.dayofyear
+        df["doy_sin"] = np.sin(2 * np.pi * doy / 365.25)
+        df["doy_cos"] = np.cos(2 * np.pi * doy / 365.25)
+        feature_cols.extend(["doy_sin", "doy_cos"])
+
     # --- Drop rows with NaN in feature columns ---
     out = df[["time", "pixel_id"] + feature_cols].dropna(subset=feature_cols)
 

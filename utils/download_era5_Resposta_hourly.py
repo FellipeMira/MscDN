@@ -13,12 +13,15 @@ except Exception as e:
 ROI_FILE = r'data/vector/ValeDoParaiba.geojson'
 gdf_roi = gpd.read_file(ROI_FILE)
 bounds = gdf_roi.total_bounds
-ROI = ee.Geometry.Rectangle([bounds[0], bounds[1], bounds[2], bounds[3]])
+ROI = ee.Geometry.Rectangle([bounds[0],
+                             bounds[1], 
+                             bounds[2], 
+                             bounds[3]])
 
-START_YEAR = 2025 #1995
-END_YEAR = 2025
+START_YEAR = 1995  #2015  #1995
+END_YEAR = 2019 #2025
 VAR_BAND = 'total_precipitation' 
-FOLDER_DRIVE = "ERA5_Land_Hourly_Precipitation"
+FOLDER_DRIVE = "ERA5_Hourly_Precipitation"
 
 def preprocess_image(image):
     """
@@ -43,7 +46,7 @@ def export_data_batch(roi, start_year, end_year, folder):
     Gerencia a exportação em lotes mensais para contornar o limite de 5000 bandas
     do método.toBands() e limites de memória do GEE.
     """
-    collection = ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY")
+    collection = ee.ImageCollection("ECMWF/ERA5/HOURLY")
     
     tasks = []
     
@@ -83,7 +86,7 @@ def export_data_batch(roi, start_year, end_year, folder):
                 fileNamePrefix=filename,
                 region=roi,
                 crs='EPSG:4326',
-                scale=11131.949,
+                scale=27830,
                 maxPixels=1e13,
                 fileFormat='GeoTIFF' 
             )

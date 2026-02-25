@@ -3,18 +3,16 @@ pipeline.evaluation
 ===================
 Metrics computation and reporting for VP (Valor de Probabilidade) targets.
 
-Metrics
--------
-Since the target is a continuous VP score in [0, 1] anchored on P90/P95/P100:
+Two Metric Families
+-------------------
+**Regression metrics** — evaluate the continuous VP score ∈ [0, 1]:
+  Brier, RMSE, MAE, R², SMAPE
 
-* **Brier score**  — proper scoring rule for probabilistic forecasts.
-* **RMSE**         — root mean squared error on the continuous VP score.
-* **MAE**          — mean absolute error on the continuous VP score.
-* **R²**           — coefficient of determination.
-* **Binary accuracy / F1** — after thresholding VP at 0.5 (i.e. P95).
-* **AUC-ROC**      — treating (VP > 0.5) as the positive class.
-* **Log-loss**     — binary cross-entropy (clipped predictions).
-* **Focal loss**   — weighted BCE that down-weights easy examples.
+**Anomaly-detection metrics** — after thresholding VP (default 0.5 ↔ P95):
+  Precision, Recall, F1, PR-AUC, ROC-AUC, Log-loss, FPR
+
+Both sets are computed in ``compute_metrics()`` and returned in a single dict
+prefixed by their family for clarity.
 
 Loss Recommendations for VP Targets
 ------------------------------------
@@ -27,14 +25,10 @@ Focal          prob.   rare events  γ=2 focuses on hard examples.
 Huber          cont.   outliers     L1-like for large errors.
 =============  ======  ===========  ======================================
 
-For VP targets where extreme events (VP > 0.5) are rare, **Focal loss**
-or **BCE** tend to outperform MSE.  Use MSE / Huber if the VP distribution
-is relatively balanced.
-
 Public API
 ----------
 compute_metrics(y_true, y_pred)  → dict
-train_evaluate(model, X_train, y_train, X_val, y_val, X_test, y_test, ...)
+train_evaluate(model, ...)       → dict with model, val/test metrics
 """
 
 from __future__ import annotations
@@ -45,6 +39,7 @@ import numpy as np
 import pandas as pd
 
 from sklearn.metrics import (
+    average_precision_score,
     brier_score_loss,
     mean_absolute_error,
     mean_squared_error,
@@ -52,6 +47,8 @@ from sklearn.metrics import (
     accuracy_score,
     f1_score,
     log_loss,
+    precision_score,
+    recall_score,
     roc_auc_score,
 )
 
@@ -60,50 +57,83 @@ from sklearn.metrics import (
 #  Metrics                                                                  #
 # ======================================================================== #
 
+def _safe_smape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Symmetric Mean Absolute Percentage Error (bounded 0-200%)."""
+    denom = np.abs(y_true) + np.abs(y_pred)
+    mask = denom > 1e-12
+    if mask.sum() == 0:
+        return 0.0
+    return float(
+        200.0 * np.mean(np.abs(y_true[mask] - y_pred[mask]) / denom[mask])
+    )
+
+
 def compute_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     threshold: float = 0.5,
 ) -> Dict[str, float]:
     """
-    Compute a comprehensive set of metrics for fuzzy / probabilistic targets.
+    Compute a comprehensive set of metrics for VP targets.
 
     Parameters
     ----------
     y_true : array-like, shape (n,)
-        Ground-truth values in [0, 1].
+        Ground-truth VP values in [0, 1].
     y_pred : array-like, shape (n,)
-        Predicted values (clipped to [0, 1] internally).
+        Predicted VP values (clipped to [0, 1] internally).
     threshold : float
-        Cut-off for converting scores to binary labels.
+        Cut-off for binary anomaly classification.
 
     Returns
     -------
-    dict
-        Keys: ``brier, rmse, mae, r2, accuracy, f1, log_loss, auc_roc``.
+    dict  — keys include:
+        *Regression*: ``brier, rmse, mae, r2, smape``
+        *Anomaly*: ``accuracy, precision, recall, f1, fpr, log_loss,
+        auc_roc, pr_auc``
     """
     y_true = np.asarray(y_true, dtype=np.float64)
     y_pred = np.clip(np.asarray(y_pred, dtype=np.float64), 0.0, 1.0)
 
+    # ---- Binary labels (VP > threshold ↔ extreme event) ----
     y_bin_true = (y_true > threshold).astype(int)
-    y_pred_clip = np.clip(y_pred, 1e-7, 1.0 - 1e-7)  # for log-loss
+    y_pred_clip = np.clip(y_pred, 1e-7, 1.0 - 1e-7)
 
     metrics: Dict[str, float] = {}
+
+    # ---- Regression ----
     metrics["brier"] = float(brier_score_loss(y_bin_true, y_pred))
     metrics["rmse"] = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     metrics["mae"] = float(mean_absolute_error(y_true, y_pred))
     metrics["r2"] = float(r2_score(y_true, y_pred))
+    metrics["smape"] = _safe_smape(y_true, y_pred)
 
+    # ---- Anomaly detection (binary) ----
     y_bin_pred = (y_pred > threshold).astype(int)
     metrics["accuracy"] = float(accuracy_score(y_bin_true, y_bin_pred))
-    metrics["f1"] = float(f1_score(y_bin_true, y_bin_pred, zero_division=0))
+    metrics["precision"] = float(
+        precision_score(y_bin_true, y_bin_pred, zero_division=0)
+    )
+    metrics["recall"] = float(
+        recall_score(y_bin_true, y_bin_pred, zero_division=0)
+    )
+    metrics["f1"] = float(
+        f1_score(y_bin_true, y_bin_pred, zero_division=0)
+    )
     metrics["log_loss"] = float(log_loss(y_bin_true, y_pred_clip))
+
+    # FPR — false positive rate
+    fp = int(((y_bin_pred == 1) & (y_bin_true == 0)).sum())
+    tn = int(((y_bin_pred == 0) & (y_bin_true == 0)).sum())
+    metrics["fpr"] = float(fp / max(fp + tn, 1))
 
     # AUC — requires both classes present
     if len(np.unique(y_bin_true)) > 1:
         metrics["auc_roc"] = float(roc_auc_score(y_bin_true, y_pred))
+        metrics["pr_auc"] = float(average_precision_score(y_bin_true, y_pred))
     else:
         metrics["auc_roc"] = float("nan")
+        metrics["pr_auc"] = float("nan")
 
     return metrics
 
@@ -136,8 +166,8 @@ def train_evaluate(
         Feature / target arrays.
     model_name : str
     input_type : str
-        ``"tabular"`` or ``"sequence"``.  For sequence models the arrays
-        are reshaped to 3-D ``(N, P, n_features)`` before fitting.
+        ``"tabular"`` or ``"sequence"``.  For sequence models the model's
+        P / n_features attributes are set for reshape.
     P, n_features : int, optional
         Required for sequence models to reshape flat features.
 
@@ -145,9 +175,9 @@ def train_evaluate(
     -------
     dict
         ``{"model_name": ..., "val_metrics": {...}, "test_metrics": {...},
-           "model": fitted_model}``
+           "model": fitted_model, "test_predictions": ndarray}``
     """
-    # Reshape for LSTM-family models
+    # Prepare sequence models
     if input_type == "sequence" and P is not None and n_features is not None:
         if hasattr(model, "P"):
             model.P = P
@@ -155,7 +185,6 @@ def train_evaluate(
 
     # Fit
     try:
-        # Some models support eval_set for early stopping (LightGBM, XGBoost)
         if _supports_eval_set(model):
             model.fit(
                 X_train, y_train,
@@ -183,6 +212,7 @@ def train_evaluate(
         "val_metrics": compute_metrics(y_val, val_pred),
         "test_metrics": compute_metrics(y_test, test_pred),
         "model": model,
+        "val_predictions": val_pred,
         "test_predictions": test_pred,
     }
 
